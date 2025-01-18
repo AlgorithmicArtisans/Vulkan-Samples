@@ -256,7 +256,7 @@ void HelloTriangle::init_instance()
 	VkApplicationInfo app{VK_STRUCTURE_TYPE_APPLICATION_INFO};
 	app.pApplicationName = "Hello Triangle";
 	app.pEngineName      = "Vulkan Samples";
-	app.apiVersion       = VK_MAKE_VERSION(1, 0, 0);
+	app.apiVersion       = VK_MAKE_VERSION(1, 3, 0);
 
 	VkInstanceCreateInfo instance_info{VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO};
 	instance_info.pApplicationInfo        = &app;
@@ -361,12 +361,21 @@ void HelloTriangle::init_device()
 	std::vector<const char *> required_device_extensions{VK_KHR_SWAPCHAIN_EXTENSION_NAME};
 	if (!validate_extensions(required_device_extensions, device_extensions))
 	{
-		throw std::runtime_error("Required device extensions are missing.");
+		throw std::runtime_error("Required device extensions are missing, will try without.");
 	}
 
-	// The sample uses a single graphics queue
-	const float queue_priority = 1.0f;
+    // validate features
+    VkPhysicalDeviceFeatures features{};
+    VkPhysicalDeviceDynamicRenderingFeatures dynamic_rendering{ VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DYNAMIC_RENDERING_FEATURES };
+    dynamic_rendering.dynamicRendering = VK_TRUE;
+    VkPhysicalDeviceFeatures2 feature_chain{ VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2 };
+    feature_chain.pNext = &dynamic_rendering;
+    feature_chain.features = features;
+    // vkGetPhysicalDeviceFeatures2(context.gpu, &feature_chain);
 
+	float queue_priority = 1.0f;
+
+	// Create one queue
 	VkDeviceQueueCreateInfo queue_info{VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO};
 	queue_info.queueFamilyIndex = context.graphics_queue_index;
 	queue_info.queueCount       = 1;
@@ -377,6 +386,7 @@ void HelloTriangle::init_device()
 	device_info.pQueueCreateInfos       = &queue_info;
 	device_info.enabledExtensionCount   = vkb::to_u32(required_device_extensions.size());
 	device_info.ppEnabledExtensionNames = required_device_extensions.data();
+    device_info.pNext = &feature_chain;
 
 	VK_CHECK(vkCreateDevice(context.gpu, &device_info, nullptr, &context.device));
 	volkLoadDevice(context.device);
@@ -395,15 +405,24 @@ void HelloTriangle::init_per_frame(PerFrame &per_frame)
 	VK_CHECK(vkCreateFence(context.device, &info, nullptr, &per_frame.queue_submit_fence));
 
 	VkCommandPoolCreateInfo cmd_pool_info{VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO};
-	cmd_pool_info.flags            = VK_COMMAND_POOL_CREATE_TRANSIENT_BIT;
+	cmd_pool_info.flags            = 0;
 	cmd_pool_info.queueFamilyIndex = context.graphics_queue_index;
 	VK_CHECK(vkCreateCommandPool(context.device, &cmd_pool_info, nullptr, &per_frame.primary_command_pool));
 
 	VkCommandBufferAllocateInfo cmd_buf_info{VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO};
 	cmd_buf_info.commandPool        = per_frame.primary_command_pool;
 	cmd_buf_info.level              = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
-	cmd_buf_info.commandBufferCount = 1;
-	VK_CHECK(vkAllocateCommandBuffers(context.device, &cmd_buf_info, &per_frame.primary_command_buffer));
+	cmd_buf_info.commandBufferCount = 2;
+    per_frame.primary_command_buffers.resize(2);
+	VK_CHECK(vkAllocateCommandBuffers(context.device, &cmd_buf_info, per_frame.primary_command_buffers.data()));
+
+    record_functions = {
+        &HelloTriangle::record_square,
+        &HelloTriangle::record_triangle
+    };
+
+	per_frame.device      = context.device;
+	per_frame.queue_index = context.graphics_queue_index;
 }
 
 /**
@@ -419,12 +438,14 @@ void HelloTriangle::teardown_per_frame(PerFrame &per_frame)
 		per_frame.queue_submit_fence = VK_NULL_HANDLE;
 	}
 
-	if (per_frame.primary_command_buffer != VK_NULL_HANDLE)
-	{
-		vkFreeCommandBuffers(context.device, per_frame.primary_command_pool, 1, &per_frame.primary_command_buffer);
+    for (VkCommandBuffer& primary_command_buffer : per_frame.primary_command_buffers) {
+        if (primary_command_buffer != VK_NULL_HANDLE)
+        {
+            vkFreeCommandBuffers(context.device, per_frame.primary_command_pool, 1, &primary_command_buffer);
+        }
+    }
+    per_frame.primary_command_buffers.clear();
 
-		per_frame.primary_command_buffer = VK_NULL_HANDLE;
-	}
 
 	if (per_frame.primary_command_pool != VK_NULL_HANDLE)
 	{
@@ -545,6 +566,7 @@ void HelloTriangle::init_swapchain()
 		}
 
 		context.swapchain_image_views.clear();
+        context.swapchain_images.clear();
 
 		vkDestroySwapchainKHR(context.device, old_swapchain, nullptr);
 	}
@@ -588,72 +610,73 @@ void HelloTriangle::init_swapchain()
 		VK_CHECK(vkCreateImageView(context.device, &view_info, nullptr, &image_view));
 
 		context.swapchain_image_views.push_back(image_view);
+        context.swapchain_images.push_back(swapchain_images[i]);
 	}
 }
 
 /**
  * @brief Initializes the Vulkan render pass.
  */
-void HelloTriangle::init_render_pass()
-{
-	VkAttachmentDescription attachment = {0};
-	// Backbuffer format.
-	attachment.format = context.swapchain_dimensions.format;
-	// Not multisampled.
-	attachment.samples = VK_SAMPLE_COUNT_1_BIT;
-	// When starting the frame, we want tiles to be cleared.
-	attachment.loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
-	// When ending the frame, we want tiles to be written out.
-	attachment.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
-	// Don't care about stencil since we're not using it.
-	attachment.stencilLoadOp  = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
-	attachment.stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
-
-	// The image layout will be undefined when the render pass begins.
-	attachment.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
-	// After the render pass is complete, we will transition to PRESENT_SRC_KHR layout.
-	attachment.finalLayout = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;
-
-	// We have one subpass. This subpass has one color attachment.
-	// While executing this subpass, the attachment will be in attachment optimal layout.
-	VkAttachmentReference color_ref = {0, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL};
-
-	// We will end up with two transitions.
-	// The first one happens right before we start subpass #0, where
-	// UNDEFINED is transitioned into COLOR_ATTACHMENT_OPTIMAL.
-	// The final layout in the render pass attachment states PRESENT_SRC_KHR, so we
-	// will get a final transition from COLOR_ATTACHMENT_OPTIMAL to PRESENT_SRC_KHR.
-	VkSubpassDescription subpass = {0};
-	subpass.pipelineBindPoint    = VK_PIPELINE_BIND_POINT_GRAPHICS;
-	subpass.colorAttachmentCount = 1;
-	subpass.pColorAttachments    = &color_ref;
-
-	// Create a dependency to external events.
-	// We need to wait for the WSI semaphore to signal.
-	// Only pipeline stages which depend on COLOR_ATTACHMENT_OUTPUT_BIT will
-	// actually wait for the semaphore, so we must also wait for that pipeline stage.
-	VkSubpassDependency dependency = {0};
-	dependency.srcSubpass          = VK_SUBPASS_EXTERNAL;
-	dependency.dstSubpass          = 0;
-	dependency.srcStageMask        = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
-	dependency.dstStageMask        = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
-
-	// Since we changed the image layout, we need to make the memory visible to
-	// color attachment to modify.
-	dependency.srcAccessMask = 0;
-	dependency.dstAccessMask = VK_ACCESS_COLOR_ATTACHMENT_READ_BIT | VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
-
-	// Finally, create the renderpass.
-	VkRenderPassCreateInfo rp_info = {VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO};
-	rp_info.attachmentCount        = 1;
-	rp_info.pAttachments           = &attachment;
-	rp_info.subpassCount           = 1;
-	rp_info.pSubpasses             = &subpass;
-	rp_info.dependencyCount        = 1;
-	rp_info.pDependencies          = &dependency;
-
-	VK_CHECK(vkCreateRenderPass(context.device, &rp_info, nullptr, &context.render_pass));
-}
+//void HelloTriangle::init_render_pass(Context &context)
+//{
+//	VkAttachmentDescription attachment = {0};
+//	// Backbuffer format.
+//	attachment.format = context.swapchain_dimensions.format;
+//	// Not multisampled.
+//	attachment.samples = VK_SAMPLE_COUNT_1_BIT;
+//	// When starting the frame, we want tiles to be cleared.
+//	attachment.loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
+//	// When ending the frame, we want tiles to be written out.
+//	attachment.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
+//	// Don't care about stencil since we're not using it.
+//	attachment.stencilLoadOp  = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
+//	attachment.stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
+//
+//	// The image layout will be undefined when the render pass begins.
+//	attachment.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+//	// After the render pass is complete, we will transition to PRESENT_SRC_KHR layout.
+//	attachment.finalLayout = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;
+//
+//	// We have one subpass. This subpass has one color attachment.
+//	// While executing this subpass, the attachment will be in attachment optimal layout.
+//	VkAttachmentReference color_ref = {0, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL};
+//
+//	// We will end up with two transitions.
+//	// The first one happens right before we start subpass #0, where
+//	// UNDEFINED is transitioned into COLOR_ATTACHMENT_OPTIMAL.
+//	// The final layout in the render pass attachment states PRESENT_SRC_KHR, so we
+//	// will get a final transition from COLOR_ATTACHMENT_OPTIMAL to PRESENT_SRC_KHR.
+//	VkSubpassDescription subpass = {0};
+//	subpass.pipelineBindPoint    = VK_PIPELINE_BIND_POINT_GRAPHICS;
+//	subpass.colorAttachmentCount = 1;
+//	subpass.pColorAttachments    = &color_ref;
+//
+//	// Create a dependency to external events.
+//	// We need to wait for the WSI semaphore to signal.
+//	// Only pipeline stages which depend on COLOR_ATTACHMENT_OUTPUT_BIT will
+//	// actually wait for the semaphore, so we must also wait for that pipeline stage.
+//	VkSubpassDependency dependency = {0};
+//	dependency.srcSubpass          = VK_SUBPASS_EXTERNAL;
+//	dependency.dstSubpass          = 0;
+//	dependency.srcStageMask        = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
+//	dependency.dstStageMask        = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
+//
+//	// Since we changed the image layout, we need to make the memory visible to
+//	// color attachment to modify.
+//	dependency.srcAccessMask = 0;
+//	dependency.dstAccessMask = VK_ACCESS_COLOR_ATTACHMENT_READ_BIT | VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
+//
+//	// Finally, create the renderpass.
+//	VkRenderPassCreateInfo rp_info = {VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO};
+//	rp_info.attachmentCount        = 1;
+//	rp_info.pAttachments           = &attachment;
+//	rp_info.subpassCount           = 1;
+//	rp_info.pSubpasses             = &subpass;
+//	rp_info.dependencyCount        = 1;
+//	rp_info.pDependencies          = &dependency;
+//
+//	VK_CHECK(vkCreateRenderPass(context.device, &rp_info, nullptr, &context.render_pass));
+//}
 
 /**
  * @brief Helper function to load a shader module.
@@ -755,6 +778,11 @@ void HelloTriangle::init_pipeline()
 	shader_stages[1].module = load_shader_module("triangle.frag");
 	shader_stages[1].pName  = "main";
 
+    // dynamic rendering information
+    VkPipelineRenderingCreateInfo pipeline_create{ VK_STRUCTURE_TYPE_PIPELINE_RENDERING_CREATE_INFO };
+    pipeline_create.colorAttachmentCount = 1;
+    pipeline_create.pColorAttachmentFormats = &context.swapchain_dimensions.format;
+
 	VkGraphicsPipelineCreateInfo pipe{VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO};
 	pipe.stageCount          = vkb::to_u32(shader_stages.size());
 	pipe.pStages             = shader_stages.data();
@@ -766,9 +794,10 @@ void HelloTriangle::init_pipeline()
 	pipe.pViewportState      = &viewport;
 	pipe.pDepthStencilState  = &depth_stencil;
 	pipe.pDynamicState       = &dynamic;
+    pipe.pNext = &pipeline_create;
 
 	// We need to specify the pipeline layout and the render pass description up front as well.
-	pipe.renderPass = context.render_pass;
+	pipe.renderPass = VK_NULL_HANDLE;
 	pipe.layout     = context.pipeline_layout;
 
 	VK_CHECK(vkCreateGraphicsPipelines(context.device, VK_NULL_HANDLE, 1, &pipe, nullptr, &context.pipeline));
@@ -821,7 +850,7 @@ VkResult HelloTriangle::acquire_next_image(uint32_t *image)
 
 	if (context.per_frame[*image].primary_command_pool != VK_NULL_HANDLE)
 	{
-		vkResetCommandPool(context.device, context.per_frame[*image].primary_command_pool, 0);
+		// vkResetCommandPool(context.device, context.per_frame[*image].primary_command_pool, 0);
 	}
 
 	// Recycle the old semaphore back into the semaphore manager.
@@ -843,58 +872,6 @@ VkResult HelloTriangle::acquire_next_image(uint32_t *image)
  */
 void HelloTriangle::render_triangle(uint32_t swapchain_index)
 {
-	// Render to this framebuffer.
-	VkFramebuffer framebuffer = context.swapchain_framebuffers[swapchain_index];
-
-	// Allocate or re-use a primary command buffer.
-	VkCommandBuffer cmd = context.per_frame[swapchain_index].primary_command_buffer;
-
-	// We will only submit this once before it's recycled.
-	VkCommandBufferBeginInfo begin_info{VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};
-	begin_info.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
-	// Begin command recording
-	vkBeginCommandBuffer(cmd, &begin_info);
-
-	// Set clear color values.
-	VkClearValue clear_value{};
-	clear_value.color = {{0.01f, 0.01f, 0.033f, 1.0f}};
-
-	// Begin the render pass.
-	VkRenderPassBeginInfo rp_begin{VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO};
-	rp_begin.renderPass               = context.render_pass;
-	rp_begin.framebuffer              = framebuffer;
-	rp_begin.renderArea.extent.width  = context.swapchain_dimensions.width;
-	rp_begin.renderArea.extent.height = context.swapchain_dimensions.height;
-	rp_begin.clearValueCount          = 1;
-	rp_begin.pClearValues             = &clear_value;
-	// We will add draw commands in the same command buffer.
-	vkCmdBeginRenderPass(cmd, &rp_begin, VK_SUBPASS_CONTENTS_INLINE);
-
-	// Bind the graphics pipeline.
-	vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, context.pipeline);
-
-	VkViewport vp{};
-	vp.width    = static_cast<float>(context.swapchain_dimensions.width);
-	vp.height   = static_cast<float>(context.swapchain_dimensions.height);
-	vp.minDepth = 0.0f;
-	vp.maxDepth = 1.0f;
-	// Set viewport dynamically
-	vkCmdSetViewport(cmd, 0, 1, &vp);
-
-	VkRect2D scissor{};
-	scissor.extent.width  = context.swapchain_dimensions.width;
-	scissor.extent.height = context.swapchain_dimensions.height;
-	// Set scissor dynamically
-	vkCmdSetScissor(cmd, 0, 1, &scissor);
-
-	// Draw three vertices with one instance.
-	vkCmdDraw(cmd, 3, 1, 0, 0);
-
-	// Complete render pass.
-	vkCmdEndRenderPass(cmd);
-
-	// Complete the command buffer.
-	VK_CHECK(vkEndCommandBuffer(cmd));
 
 	// Submit it to the queue with a release semaphore.
 	if (context.per_frame[swapchain_index].swapchain_release_semaphore == VK_NULL_HANDLE)
@@ -907,8 +884,8 @@ void HelloTriangle::render_triangle(uint32_t swapchain_index)
 	VkPipelineStageFlags wait_stage{VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT};
 
 	VkSubmitInfo info{VK_STRUCTURE_TYPE_SUBMIT_INFO};
-	info.commandBufferCount   = 1;
-	info.pCommandBuffers      = &cmd;
+	info.commandBufferCount   = 2;
+	info.pCommandBuffers      = context.per_frame[swapchain_index].primary_command_buffers.data();
 	info.waitSemaphoreCount   = 1;
 	info.pWaitSemaphores      = &context.per_frame[swapchain_index].swapchain_acquire_semaphore;
 	info.pWaitDstStageMask    = &wait_stage;
@@ -938,43 +915,56 @@ VkResult HelloTriangle::present_image(uint32_t index)
 /**
  * @brief Initializes the Vulkan framebuffers.
  */
-void HelloTriangle::init_framebuffers()
+//void HelloTriangle::init_framebuffers(Context &context)
+//{
+//	VkDevice device = context.device;
+//
+//	// Create framebuffer for each swapchain image view
+//	for (auto &image_view : context.swapchain_image_views)
+//	{
+//		// Build the framebuffer.
+//		VkFramebufferCreateInfo fb_info{VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO};
+//		fb_info.renderPass      = context.render_pass;
+//		fb_info.attachmentCount = 1;
+//		fb_info.pAttachments    = &image_view;
+//		fb_info.width           = context.swapchain_dimensions.width;
+//		fb_info.height          = context.swapchain_dimensions.height;
+//		fb_info.layers          = 1;
+//
+//		VkFramebuffer framebuffer;
+//		VK_CHECK(vkCreateFramebuffer(device, &fb_info, nullptr, &framebuffer));
+//
+//		context.swapchain_framebuffers.push_back(framebuffer);
+//	}
+//}
+
+/**
+ * @brief Tears down the framebuffers. If our swapchain changes, we will call this, and create a new swapchain.
+ * @param context The Vulkan context.
+ */
+//void HelloTriangle::teardown_framebuffers(Context &context)
+//{
+//	// Wait until device is idle before teardown.
+//	vkQueueWaitIdle(context.queue);
+//
+//	for (auto &framebuffer : context.swapchain_framebuffers)
+//	{
+//		vkDestroyFramebuffer(context.device, framebuffer, nullptr);
+//	}
+//
+//	context.swapchain_framebuffers.clear();
+//}
+
+/**
+ * @brief Tears down the Vulkan context.
+ * @param context The Vulkan context.
+ */
+void HelloTriangle::teardown(Context &context)
 {
-	context.swapchain_framebuffers.clear();
-
-	// Create framebuffer for each swapchain image view
-	for (auto &image_view : context.swapchain_image_views)
-	{
-		// Build the framebuffer.
-		VkFramebufferCreateInfo fb_info{VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO};
-		fb_info.renderPass      = context.render_pass;
-		fb_info.attachmentCount = 1;
-		fb_info.pAttachments    = &image_view;
-		fb_info.width           = context.swapchain_dimensions.width;
-		fb_info.height          = context.swapchain_dimensions.height;
-		fb_info.layers          = 1;
-
-		VkFramebuffer framebuffer;
-		VK_CHECK(vkCreateFramebuffer(context.device, &fb_info, nullptr, &framebuffer));
-
-		context.swapchain_framebuffers.push_back(framebuffer);
-	}
-}
-
-HelloTriangle::HelloTriangle()
-{
-}
-
-HelloTriangle::~HelloTriangle()
-{
-	// When destroying the application, we need to make sure the GPU is no longer accessing any resources
-	// This is done by doing a device wait idle, which blocks until the GPU signals
+	// Don't release anything until the GPU is completely idle.
 	vkDeviceWaitIdle(context.device);
 
-	for (auto &framebuffer : context.swapchain_framebuffers)
-	{
-		vkDestroyFramebuffer(context.device, framebuffer, nullptr);
-	}
+	// teardown_framebuffers(context);
 
 	for (auto &per_frame : context.per_frame)
 	{
@@ -998,10 +988,10 @@ HelloTriangle::~HelloTriangle()
 		vkDestroyPipelineLayout(context.device, context.pipeline_layout, nullptr);
 	}
 
-	if (context.render_pass != VK_NULL_HANDLE)
-	{
-		vkDestroyRenderPass(context.device, context.render_pass, nullptr);
-	}
+	//if (context.render_pass != VK_NULL_HANDLE)
+	//{
+	//	vkDestroyRenderPass(context.device, context.render_pass, nullptr);
+	//}
 
 	for (VkImageView image_view : context.swapchain_image_views)
 	{
@@ -1031,13 +1021,250 @@ HelloTriangle::~HelloTriangle()
 	vk_instance.reset();
 }
 
+HelloTriangle::HelloTriangle()
+{
+}
+
+HelloTriangle::~HelloTriangle()
+{
+	teardown(context);
+}
+
+void HelloTriangle::record_triangle(Context& context, VkCommandBuffer& cmd) {
+    VkViewport vp{};
+    vp.width = static_cast<float>(context.swapchain_dimensions.width);
+    vp.height = static_cast<float>(context.swapchain_dimensions.height) / 2.0f;
+    vp.minDepth = 0.0f;
+    vp.maxDepth = 1.0f;
+    // Set viewport dynamically
+    vkCmdSetViewport(cmd, 0, 1, &vp);
+    // Draw 3 vertices with one instance.
+    vkCmdDraw(cmd, 3, 1, 0, 0);
+}
+
+void HelloTriangle::record_square(Context& context, VkCommandBuffer& cmd) {
+    VkViewport vp{};
+    vp.y = static_cast<float>(context.swapchain_dimensions.height) / 2.0f;
+    vp.width = static_cast<float>(context.swapchain_dimensions.width);
+    vp.height = static_cast<float>(context.swapchain_dimensions.height) / 2.0f;
+    vp.minDepth = 0.0f;
+    vp.maxDepth = 1.0f;
+    // Set viewport dynamically
+    vkCmdSetViewport(cmd, 0, 1, &vp);
+    // Draw 6 vertices with one instance.
+    vkCmdDraw(cmd, 6, 1, 0, 0);
+}
+
+VkAccessFlags getAccessFlags(VkImageLayout layout)
+{
+    switch (layout)
+    {
+    case VK_IMAGE_LAYOUT_UNDEFINED:
+    case VK_IMAGE_LAYOUT_PRESENT_SRC_KHR:
+        return 0;
+    case VK_IMAGE_LAYOUT_PREINITIALIZED:
+        return VK_ACCESS_HOST_WRITE_BIT;
+    case VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL:
+        return VK_ACCESS_COLOR_ATTACHMENT_READ_BIT | VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
+    case VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL:
+        return VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_READ_BIT | VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT;
+    case VK_IMAGE_LAYOUT_FRAGMENT_SHADING_RATE_ATTACHMENT_OPTIMAL_KHR:
+        return VK_ACCESS_FRAGMENT_SHADING_RATE_ATTACHMENT_READ_BIT_KHR;
+    case VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL:
+        return VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_INPUT_ATTACHMENT_READ_BIT;
+    case VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL:
+        return VK_ACCESS_TRANSFER_READ_BIT;
+    case VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL:
+        return VK_ACCESS_TRANSFER_WRITE_BIT;
+    case VK_IMAGE_LAYOUT_GENERAL:
+        assert(false && "Don't know how to get a meaningful VkAccessFlags for VK_IMAGE_LAYOUT_GENERAL! Don't use it!");
+        return 0;
+    default:
+        assert(false);
+        return 0;
+    }
+}
+
+VkPipelineStageFlags getPipelineStageFlags(VkImageLayout layout)
+{
+    switch (layout)
+    {
+    case VK_IMAGE_LAYOUT_UNDEFINED:
+        return VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT;
+    case VK_IMAGE_LAYOUT_PREINITIALIZED:
+        return VK_PIPELINE_STAGE_HOST_BIT;
+    case VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL:
+    case VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL:
+        return VK_PIPELINE_STAGE_TRANSFER_BIT;
+    case VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL:
+        return VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
+    case VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL:
+        return VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT | VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT;
+    case VK_IMAGE_LAYOUT_FRAGMENT_SHADING_RATE_ATTACHMENT_OPTIMAL_KHR:
+        return VK_PIPELINE_STAGE_FRAGMENT_SHADING_RATE_ATTACHMENT_BIT_KHR;
+    case VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL:
+        return VK_PIPELINE_STAGE_VERTEX_SHADER_BIT | VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT;
+    case VK_IMAGE_LAYOUT_PRESENT_SRC_KHR:
+        return VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT;
+    case VK_IMAGE_LAYOUT_GENERAL:
+        assert(false && "Don't know how to get a meaningful VkPipelineStageFlags for VK_IMAGE_LAYOUT_GENERAL! Don't use it!");
+        return 0;
+    default:
+        assert(false);
+        return 0;
+    }
+}
+
+// Create an image memory barrier for changing the layout of
+// an image and put it into an active command buffer
+// See chapter 12.4 "Image Layout" for details
+
+void image_layout_transition(VkCommandBuffer                command_buffer,
+    VkImage                        image,
+    VkPipelineStageFlags           src_stage_mask,
+    VkPipelineStageFlags           dst_stage_mask,
+    VkAccessFlags                  src_access_mask,
+    VkAccessFlags                  dst_access_mask,
+    VkImageLayout                  old_layout,
+    VkImageLayout                  new_layout,
+    VkImageSubresourceRange const& subresource_range)
+{
+    // Create an image barrier object
+    VkImageMemoryBarrier image_memory_barrier{};
+    image_memory_barrier.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+    image_memory_barrier.srcAccessMask = src_access_mask;
+    image_memory_barrier.dstAccessMask = dst_access_mask;
+    image_memory_barrier.oldLayout = old_layout;
+    image_memory_barrier.newLayout = new_layout;
+    image_memory_barrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    image_memory_barrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    image_memory_barrier.image = image;
+    image_memory_barrier.subresourceRange = subresource_range;
+
+    // Put barrier inside setup command buffer
+    vkCmdPipelineBarrier(command_buffer, src_stage_mask, dst_stage_mask, 0, 0, nullptr, 0, nullptr, 1, &image_memory_barrier);
+}
+
+void image_layout_transition(VkCommandBuffer                command_buffer,
+    VkImage                        image,
+    VkImageLayout                  old_layout,
+    VkImageLayout                  new_layout,
+    VkImageSubresourceRange const& subresource_range)
+{
+    VkPipelineStageFlags src_stage_mask = getPipelineStageFlags(old_layout);
+    VkPipelineStageFlags dst_stage_mask = getPipelineStageFlags(new_layout);
+    VkAccessFlags        src_access_mask = getAccessFlags(old_layout);
+    VkAccessFlags        dst_access_mask = getAccessFlags(new_layout);
+
+    image_layout_transition(command_buffer, image, src_stage_mask, dst_stage_mask, src_access_mask, dst_access_mask, old_layout, new_layout, subresource_range);
+}
+
+void HelloTriangle::record_command_buffers(Context& context) {
+    // Create framebuffer for each swapchain image view
+    VkImageSubresourceRange range{};
+    range.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+    range.baseMipLevel = 0;
+    range.levelCount = VK_REMAINING_MIP_LEVELS;
+    range.baseArrayLayer = 0;
+    range.layerCount = VK_REMAINING_ARRAY_LAYERS;
+
+    for (int i = 0; i < context.per_frame.size(); i++) {
+        VkCommandBuffer square_cmd = context.per_frame[i].primary_command_buffers[0];
+        // Render to this framebuffer.
+        // VkFramebuffer framebuffer = context.swapchain_framebuffers[i];
+
+        VkImageView image_view = context.swapchain_image_views[i];
+        VkRenderingAttachmentInfo color_attachment{ VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO };
+
+        // Set clear color values.
+        VkClearValue clear_value;
+        clear_value.color = { {0.01f, 0.01f, 0.033f, 1.0f} };
+
+        color_attachment.clearValue = clear_value;
+        color_attachment.imageView = image_view;
+        color_attachment.imageLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+        color_attachment.resolveMode = VK_RESOLVE_MODE_NONE;
+        color_attachment.loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
+        color_attachment.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
+
+        VkRenderingInfo render_info{ VK_STRUCTURE_TYPE_RENDERING_INFO };
+        render_info.renderArea.extent.width = context.swapchain_dimensions.width;
+        render_info.renderArea.extent.height = context.swapchain_dimensions.height;
+        render_info.layerCount = 1;
+        render_info.colorAttachmentCount = 1;
+        render_info.pColorAttachments = &color_attachment;
+        render_info.flags = VK_RENDERING_SUSPENDING_BIT;
+
+        // We will only submit this once before it's recycled.
+        VkCommandBufferBeginInfo begin_info{ VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO };
+        begin_info.flags = 0;
+        // Begin command recording
+        vkBeginCommandBuffer(square_cmd, &begin_info);
+
+        image_layout_transition(
+            square_cmd,
+            context.swapchain_images[i],
+            VK_IMAGE_LAYOUT_UNDEFINED,
+            VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+            range
+        );
+
+        vkCmdBeginRendering(square_cmd, &render_info);
+
+        // Bind the graphics pipeline.
+        vkCmdBindPipeline(square_cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, context.pipeline);
+
+        VkRect2D scissor{};
+        scissor.extent.width = context.swapchain_dimensions.width;
+        scissor.extent.height = context.swapchain_dimensions.height;
+        // Set scissor dynamically
+        vkCmdSetScissor(square_cmd, 0, 1, &scissor);
+
+        record_square(context, square_cmd);
+
+        // Complete render pass.
+        vkCmdEndRendering(square_cmd);
+
+        // Complete the command buffer.
+        VK_CHECK(vkEndCommandBuffer(square_cmd));
+
+        color_attachment.loadOp = VK_ATTACHMENT_LOAD_OP_LOAD;
+        color_attachment.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
+        VkCommandBuffer triangle_cmd = context.per_frame[i].primary_command_buffers[1];
+
+        vkBeginCommandBuffer(triangle_cmd, &begin_info);
+        render_info.flags = VK_RENDERING_RESUMING_BIT;
+        vkCmdBeginRendering(triangle_cmd, &render_info);
+        vkCmdBindPipeline(triangle_cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, context.pipeline);
+        vkCmdSetScissor(triangle_cmd, 0, 1, &scissor);
+        
+
+        record_triangle(context, triangle_cmd);
+
+        vkCmdEndRendering(triangle_cmd);
+
+        image_layout_transition(
+            triangle_cmd,
+            context.swapchain_images[i],
+            VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+            VK_IMAGE_LAYOUT_PRESENT_SRC_KHR,
+            range
+        );
+
+        VK_CHECK(vkEndCommandBuffer(triangle_cmd));
+
+
+    }
+    
+}
+
 bool HelloTriangle::prepare(const vkb::ApplicationOptions &options)
 {
 	// Headless is not supported to keep this sample as simple as possible
 	assert(options.window != nullptr);
 	assert(options.window->get_window_mode() != vkb::Window::Mode::Headless);
 
-	init_instance();
+    init_instance(context, { VK_KHR_SURFACE_EXTENSION_NAME }, {});
 
 	vk_instance = std::make_unique<vkb::Instance>(context.instance);
 
@@ -1056,9 +1283,11 @@ bool HelloTriangle::prepare(const vkb::ApplicationOptions &options)
 	init_swapchain();
 
 	// Create the necessary objects for rendering.
-	init_render_pass();
-	init_pipeline();
-	init_framebuffers();
+	// init_render_pass(context);
+	init_pipeline(context);
+	// init_framebuffers(context);
+
+    record_command_buffers(context);
 
 	return true;
 }
@@ -1082,8 +1311,9 @@ void HelloTriangle::update(float delta_time)
 		return;
 	}
 
-	render_triangle(index);
-	res = present_image(index);
+    
+	render_triangle(context, index);
+	res = present_image(context, index);
 
 	// Handle Outdated error in present.
 	if (res == VK_SUBOPTIMAL_KHR || res == VK_ERROR_OUT_OF_DATE_KHR)
@@ -1114,14 +1344,11 @@ bool HelloTriangle::resize(const uint32_t, const uint32_t)
 	}
 
 	vkDeviceWaitIdle(context.device);
+	// teardown_framebuffers(context);
 
-	for (auto &framebuffer : context.swapchain_framebuffers)
-	{
-		vkDestroyFramebuffer(context.device, framebuffer, nullptr);
-	}
-
-	init_swapchain();
-	init_framebuffers();
+	init_swapchain(context);
+	// init_framebuffers(context);
+    record_command_buffers(context);
 	return true;
 }
 

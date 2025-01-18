@@ -130,11 +130,11 @@ function(add_project)
     cmake_parse_arguments(TARGET "${options}" "${oneValueArgs}" "${multiValueArgs}" ${ARGN})
 
     if(${TARGET_TYPE} STREQUAL "Sample")
-        set("VKB_${TARGET_ID}" ON CACHE BOOL "Build sample ${TARGET_ID}")
+        set("VKB_${TARGET_ID}" OFF CACHE BOOL "Build sample ${TARGET_ID}")
     endif()
 
     if(NOT ${VKB_${TARGET_ID}})
-        # message(STATUS "${TARGET_TYPE} `${TARGET_ID}` - DISABLED")
+        message(STATUS "${TARGET_TYPE} `${TARGET_ID}` - DISABLED")
         return()
     endif()
 

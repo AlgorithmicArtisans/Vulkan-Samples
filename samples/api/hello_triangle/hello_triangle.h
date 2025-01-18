@@ -47,11 +47,19 @@ class HelloTriangle : public vkb::Application
 	 */
 	struct PerFrame
 	{
-		VkFence         queue_submit_fence          = VK_NULL_HANDLE;
-		VkCommandPool   primary_command_pool        = VK_NULL_HANDLE;
-		VkCommandBuffer primary_command_buffer      = VK_NULL_HANDLE;
-		VkSemaphore     swapchain_acquire_semaphore = VK_NULL_HANDLE;
-		VkSemaphore     swapchain_release_semaphore = VK_NULL_HANDLE;
+		VkDevice device = VK_NULL_HANDLE;
+
+		VkFence queue_submit_fence = VK_NULL_HANDLE;
+
+		VkCommandPool primary_command_pool = VK_NULL_HANDLE;
+
+		std::vector<VkCommandBuffer> primary_command_buffers;
+
+		VkSemaphore swapchain_acquire_semaphore = VK_NULL_HANDLE;
+
+		VkSemaphore swapchain_release_semaphore = VK_NULL_HANDLE;
+
+		int32_t queue_index;
 	};
 
 	/**
@@ -85,12 +93,13 @@ class HelloTriangle : public vkb::Application
 
 		/// The image view for each swapchain image.
 		std::vector<VkImageView> swapchain_image_views;
+        std::vector<VkImage> swapchain_images;
 
 		/// The framebuffer for each swapchain image view.
-		std::vector<VkFramebuffer> swapchain_framebuffers;
+		// std::vector<VkFramebuffer> swapchain_framebuffers;
 
 		/// The renderpass description.
-		VkRenderPass render_pass = VK_NULL_HANDLE;
+		// VkRenderPass render_pass = VK_NULL_HANDLE;
 
 		/// The graphics pipeline.
 		VkPipeline pipeline = VK_NULL_HANDLE;
@@ -136,7 +145,7 @@ class HelloTriangle : public vkb::Application
 
 	void init_per_frame(PerFrame &per_frame);
 
-	void teardown_per_frame(PerFrame &per_frame);
+	// void init_render_pass(Context &context);
 
 	void init_swapchain();
 
@@ -148,9 +157,15 @@ class HelloTriangle : public vkb::Application
 
 	VkResult acquire_next_image(uint32_t *image);
 
-	void render_triangle(uint32_t swapchain_index);
+	// void init_framebuffers(Context &context);
 
-	VkResult present_image(uint32_t index);
+	// void teardown_framebuffers(Context &context);
+
+    void record_command_buffers(Context& contex);
+
+    void HelloTriangle::record_triangle(Context& context, VkCommandBuffer& cmd);
+
+    void HelloTriangle::record_square(Context& context, VkCommandBuffer& cmd);
 
 	void init_framebuffers();
 
@@ -158,6 +173,7 @@ class HelloTriangle : public vkb::Application
 	Context context;
 
 	std::unique_ptr<vkb::Instance> vk_instance;
+    std::vector<std::function<void(HelloTriangle*, Context&, VkCommandBuffer&)>> record_functions;
 };
 
 std::unique_ptr<vkb::Application> create_hello_triangle();

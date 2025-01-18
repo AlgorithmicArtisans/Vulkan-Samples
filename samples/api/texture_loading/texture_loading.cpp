@@ -102,7 +102,7 @@ void TextureLoading::load_texture()
 	VkBool32 use_staging = true;
 
 	// Only use linear tiling if forced
-	bool force_linear_tiling = false;
+	bool force_linear_tiling = true;
 	if (force_linear_tiling)
 	{
 		// Don't use linear if format is not supported for (linear) shader sampling
