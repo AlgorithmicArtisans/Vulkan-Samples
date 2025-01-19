@@ -149,7 +149,7 @@ class HelloTriangle : public vkb::Application
 
 	void init_swapchain();
 
-	void init_render_pass();
+	// void init_render_pass(Context &context);
 
 	VkShaderModule load_shader_module(const char *path);
 
@@ -161,9 +161,15 @@ class HelloTriangle : public vkb::Application
 
 	// void teardown_framebuffers(Context &context);
 
+	// void init_framebuffers(Context &context);
+
+	// void teardown_framebuffers(Context &context);
+
     void record_command_buffers(Context& contex);
 
     void HelloTriangle::record_triangle(Context& context, VkCommandBuffer& cmd);
+
+    void HelloTriangle::record_square(Context& context, VkCommandBuffer& cmd);
 
     void HelloTriangle::record_square(Context& context, VkCommandBuffer& cmd);
 
